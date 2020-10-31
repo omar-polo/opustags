@@ -16,7 +16,10 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+#ifndef __OpenBSD__
 #include <wordexp.h>
+#endif
 
 using namespace std::string_literals;
 
@@ -137,12 +140,49 @@ ot::status ot::encoding_converter::operator()(const char* in, size_t n, std::str
 	return ot::st::ok;
 }
 
+// wraps the path inside single quotes and escapes every single quote
+// inside the string.
+static char *shell_escape(const char *path)
+{
+	size_t len, n, i, j;
+	char *esc;
+
+	len = strlen(path);
+	n = 0;
+	for (i = 0; i < len; ++i)
+		if (path[i] == '\'')
+			n++;
+
+	// allocate:
+	// - enough space to copy the string
+	// - plus enough space to replace every ' with '\''
+	// - plus two bytes for the wrapping
+	// - plus a NUL terminator
+	if ((esc = (char*)calloc(1, len + n*3 + 2 + 1)) == NULL)
+		return NULL;
+
+	esc[0] = '\'';
+	for (i = 0, j = 1; i < len; ++i, ++j) {
+		if (path[i] == '\'') {
+			esc[j++] = '\'';
+			esc[j++] = '\\';
+			esc[j++] = '\'';
+			esc[j]   = '\'';
+		} else
+			esc[j] = path[i];
+	}
+	esc[j] = '\'';
+
+	return esc;
+}
+
 ot::status ot::run_editor(const char* editor, const char* path)
 {
 	pid_t pid = fork();
 	if (pid == -1) {
 		return {st::standard_error, "Could not fork: "s + strerror(errno)};
 	} else if (pid == 0) {
+#ifndef __OpenBSD__
 		wordexp_t p;
 		if (wordexp(editor, &p, WRDE_SHOWERR) != 0) {
 			fprintf(stderr, "error: wordexp failed while expanding %s\n", editor);
@@ -162,6 +202,20 @@ ot::status ot::run_editor(const char* editor, const char* path)
 		// execvp only returns on error. Let’s not have a runaway child process and kill it.
 		fprintf(stderr, "error: execvp %s failed: %s\n", argv[0], strerror(errno));
 		wordfree(&p);
+#else
+		const char *argp[] = {"sh", "-c", NULL, NULL};
+		char *cmd, *path_escaped;
+
+		if ((path_escaped = shell_escape(path)) == NULL)
+			exit(1);
+		if (asprintf(&cmd, "%s %s", editor, path_escaped) == -1)
+			exit(1);
+		argp[2] = cmd;
+
+		execvp((const char*)"sh", (char *const *)argp);
+		fprintf(stderr, "error: execvp %s failed: %s\n", editor, strerror(errno));
+#endif
+
 		exit(1);
 	}
 
